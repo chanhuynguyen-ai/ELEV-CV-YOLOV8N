@@ -6,11 +6,17 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 def _env_int(name: str, default: int) -> int:
-    return int(os.getenv(name, str(default)))
+    try:
+        return int(os.getenv(name, str(default)))
+    except Exception:
+        return default
 
 
 def _env_float(name: str, default: float) -> float:
-    return float(os.getenv(name, str(default)))
+    try:
+        return float(os.getenv(name, str(default)))
+    except Exception:
+        return default
 
 
 APP_ENV = os.getenv("APP_ENV", "production")
@@ -25,7 +31,6 @@ PG_DATABASE = os.getenv("PG_DATABASE", "elevator_cv")
 PG_USER = os.getenv("PG_USER", "elevator_ai")
 PG_PASSWORD = os.getenv("PG_PASSWORD", "elevator123")
 
-# DB LLM tách riêng, CV code không dùng để ghi dữ liệu camera
 LLM_DB_HOST = os.getenv("LLM_DB_HOST", "localhost")
 LLM_DB_PORT = _env_int("LLM_DB_PORT", 5432)
 LLM_DB_NAME = os.getenv("LLM_DB_NAME", "elevator_llm")
@@ -34,6 +39,9 @@ LLM_DB_PASSWORD = os.getenv("LLM_DB_PASSWORD", "elevator123")
 
 ENABLE_FACE = _env_bool("ENABLE_FACE", False)
 ENABLE_POSE = _env_bool("ENABLE_POSE", True)
+
+# Headless mode cho CV service
+CV_DASHBOARD_ENABLED = _env_bool("CV_DASHBOARD_ENABLED", False)
 
 DET_ENGINE_PATH = os.getenv("DET_ENGINE_PATH", "./models/yolov8n_fp16.engine")
 POSE_ENGINE_PATH = os.getenv("POSE_ENGINE_PATH", "./models/yolov8n_pose_fp16.engine")
@@ -47,11 +55,32 @@ DET_IOU = _env_float("DET_IOU", 0.45)
 POSE_CONF = _env_float("POSE_CONF", 0.35)
 POSE_IOU = _env_float("POSE_IOU", 0.45)
 
-YOLO_EVERY_N = _env_int("YOLO_EVERY_N", 4)
-POSE_EVERY_N = _env_int("POSE_EVERY_N", 6)
+YOLO_EVERY_N = _env_int("YOLO_EVERY_N", 2)
+POSE_EVERY_N = _env_int("POSE_EVERY_N", 4)
+
 OCCUPANCY_SAMPLE_SEC = _env_int("OCCUPANCY_SAMPLE_SEC", 10)
 EVENT_COOLDOWN_SEC = _env_int("EVENT_COOLDOWN_SEC", 8)
 CROWD_THRESHOLD = _env_int("CROWD_THRESHOLD", 4)
+
+# Overload
+OVERLOAD_THRESHOLD = _env_int("OVERLOAD_THRESHOLD", 4)
+
+# Fall / lying confirm
+LYING_CONFIRM_FRAMES = _env_int("LYING_CONFIRM_FRAMES", 3)
+FALL_CONFIRM_FRAMES = _env_int("FALL_CONFIRM_FRAMES", 2)
+FALL_MAX_TRANSITION_SEC = _env_float("FALL_MAX_TRANSITION_SEC", 1.2)
+DANGER_HOLD_SEC = _env_float("DANGER_HOLD_SEC", 2.0)
+
+# Person tracker
+TRACK_IOU_THRESH = _env_float("TRACK_IOU_THRESH", 0.30)
+TRACK_MAX_AGE = _env_int("TRACK_MAX_AGE", 8)
+TRACK_SMOOTH_ALPHA = _env_float("TRACK_SMOOTH_ALPHA", 0.65)
+TRACK_MIN_HITS = _env_int("TRACK_MIN_HITS", 1)
+
+# Bottle tracker
+BOTTLE_TRACK_IOU_THRESH = _env_float("BOTTLE_TRACK_IOU_THRESH", 0.25)
+BOTTLE_TRACK_MAX_AGE = _env_int("BOTTLE_TRACK_MAX_AGE", 6)
+BOTTLE_TRACK_MIN_HITS = _env_int("BOTTLE_TRACK_MIN_HITS", 1)
 
 FACE_SIM_THRESHOLD = _env_float("FACE_SIM_THRESHOLD", 0.45)
 FACE_DET_WIDTH = _env_int("FACE_DET_WIDTH", 96)
@@ -60,3 +89,5 @@ FACE_DET_SIZE = (FACE_DET_WIDTH, FACE_DET_HEIGHT)
 
 API_HOST = os.getenv("API_HOST", "0.0.0.0")
 API_PORT = _env_int("API_PORT", 8000)
+
+

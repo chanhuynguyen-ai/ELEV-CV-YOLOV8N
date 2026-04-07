@@ -19,10 +19,23 @@ class CameraService:
         self.detector = None
         self.pose_model = None
         self.logger = EventLogger.from_config()
+
+        # GIU FACE NHUNG KHONG DUNG TRONG BAN CHAY CHINH
         self.face_app = create_face_app() if config.ENABLE_FACE else None
 
         self.cap = None
-        self.tracker = SimpleTracker()
+        self.tracker = SimpleTracker(
+            iou_thresh=config.TRACK_IOU_THRESH,
+            max_age=config.TRACK_MAX_AGE,
+            smooth_alpha=config.TRACK_SMOOTH_ALPHA,
+            min_hits=config.TRACK_MIN_HITS,
+        )
+        self.bottle_tracker = SimpleTracker(
+            iou_thresh=config.BOTTLE_TRACK_IOU_THRESH,
+            max_age=config.BOTTLE_TRACK_MAX_AGE,
+            smooth_alpha=config.TRACK_SMOOTH_ALPHA,
+            min_hits=config.BOTTLE_TRACK_MIN_HITS,
+        )
 
         self.running = False
         self.thread = None
@@ -41,6 +54,7 @@ class CameraService:
             "unknown_count": 0,
             "lying_count": 0,
             "fall_count": 0,
+            "overload": False,
             "last_frame_ts": None,
             "error": None,
             "backend": config.CV_BACKEND,
@@ -99,7 +113,15 @@ class CameraService:
     def _draw_box(self, frame, bbox, label, color):
         x1, y1, x2, y2 = map(int, bbox)
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-        cv2.putText(frame, label, (x1, max(0, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+        cv2.putText(
+            frame,
+            label,
+            (x1, max(0, y1 - 8)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            color,
+            2,
+        )
 
     def _log_event(self, event_type, track_id=None, bbox=None, posture=None, people_count=None, person_name=None, confidence=None, extra=None):
         self.logger.log_event(
@@ -167,8 +189,9 @@ class CameraService:
                     last_poses = self.pose_model.predict(frame)
 
                 track_assignments = self.tracker.update([d["bbox"] for d in last_person_dets])
-                pose_by_track = {}
+                bottle_assignments = self.bottle_tracker.update([d["bbox"] for d in last_bottle_dets])
 
+                pose_by_track = {}
                 for pose in last_poses:
                     best_tid, best_iou = None, 0.0
                     for tid, tb in track_assignments:
@@ -183,35 +206,134 @@ class CameraService:
                 lying_count = 0
                 fall_count = 0
 
-                if people_count >= config.CROWD_THRESHOLD and self._event_ready(("CROWD", config.CAMERA_ID)):
-                    self._log_event("CROWD", people_count=people_count, extra={"threshold": config.CROWD_THRESHOLD})
+                overload = people_count >= config.OVERLOAD_THRESHOLD
+                self.status["overload"] = overload
 
-                if len(last_bottle_dets) > 0 and self._event_ready(("BOTTLE", config.CAMERA_ID)):
-                    self._log_event("BOTTLE", people_count=people_count, extra={"count": len(last_bottle_dets)})
+                if people_count >= config.CROWD_THRESHOLD and self._event_ready(("CROWD", config.CAMERA_ID)):
+                    self._log_event(
+                        "CROWD",
+                        people_count=people_count,
+                        extra={"threshold": config.CROWD_THRESHOLD},
+                    )
+
+                if overload and self._event_ready(("OVERLOAD", config.CAMERA_ID)):
+                    self._log_event(
+                        "OVERLOAD",
+                        people_count=people_count,
+                        extra={"threshold": config.OVERLOAD_THRESHOLD},
+                    )
+
+                if len(bottle_assignments) > 0 and self._event_ready(("BOTTLE", config.CAMERA_ID)):
+                    self._log_event(
+                        "BOTTLE",
+                        people_count=people_count,
+                        extra={"count": len(bottle_assignments)},
+                    )
+
+                now_ts = time.time()
 
                 for tid, bbox in track_assignments:
-                    state = self.track_state.setdefault(tid, {"posture": "unknown", "person_name": None})
-                    posture = "unknown"
+                    state = self.track_state.setdefault(
+                        tid,
+                        {
+                            "posture": "unknown",
+                            "posture_candidate": "unknown",
+                            "candidate_streak": 0,
+                            "lying_streak": 0,
+                            "fall_streak": 0,
+                            "last_upright_ts": now_ts,
+                            "danger_until": 0.0,
+                            "person_name": None,
+                        },
+                    )
+
+                    candidate_posture = "unknown"
                     if tid in pose_by_track:
-                        posture = classify_posture(pose_by_track[tid]["keypoints"], bbox)
+                        candidate_posture = classify_posture(pose_by_track[tid]["keypoints"], bbox)
 
-                    if posture == "lying":
+                    if candidate_posture == state["posture_candidate"]:
+                        state["candidate_streak"] += 1
+                    else:
+                        state["posture_candidate"] = candidate_posture
+                        state["candidate_streak"] = 1
+
+                    confirmed_posture = state["posture"]
+
+                    if candidate_posture == "standing" and state["candidate_streak"] >= 1:
+                        confirmed_posture = "standing"
+                        state["lying_streak"] = 0
+                        state["fall_streak"] = 0
+                        state["last_upright_ts"] = now_ts
+
+                    elif candidate_posture == "lying":
+                        state["lying_streak"] += 1
+                        if state["lying_streak"] >= config.LYING_CONFIRM_FRAMES:
+                            confirmed_posture = "lying"
+
+                            if now_ts - state["last_upright_ts"] <= config.FALL_MAX_TRANSITION_SEC:
+                                state["fall_streak"] += 1
+                            else:
+                                state["fall_streak"] = 0
+                        else:
+                            # chua confirm lying thi giu posture cu
+                            confirmed_posture = state["posture"]
+
+                    state["posture"] = confirmed_posture
+
+                    is_danger = False
+
+                    if confirmed_posture == "lying":
                         lying_count += 1
+                        is_danger = True
 
-                    if is_fall_transition(state["posture"], posture):
+                        if self._event_ready(("LYING", tid)):
+                            self._log_event(
+                                "LYING",
+                                track_id=tid,
+                                bbox=bbox,
+                                posture=confirmed_posture,
+                                people_count=people_count,
+                            )
+
+                    if (
+                        confirmed_posture == "lying"
+                        and state["fall_streak"] >= config.FALL_CONFIRM_FRAMES
+                    ):
                         fall_count += 1
+                        is_danger = True
+                        state["danger_until"] = now_ts + config.DANGER_HOLD_SEC
+
                         if self._event_ready(("FALL", tid)):
-                            self._log_event("FALL", track_id=tid, bbox=bbox, posture=posture, people_count=people_count)
+                            self._log_event(
+                                "FALL",
+                                track_id=tid,
+                                bbox=bbox,
+                                posture=confirmed_posture,
+                                people_count=people_count,
+                            )
 
-                    if posture == "lying" and self._event_ready(("LYING", tid)):
-                        self._log_event("LYING", track_id=tid, bbox=bbox, posture=posture, people_count=people_count)
+                        state["fall_streak"] = 0
 
-                    state["posture"] = posture
+                    if now_ts < state["danger_until"]:
+                        is_danger = True
+
                     person_name = state["person_name"] or ("track:%s" % tid)
-                    self._draw_box(frame, bbox, "%s | %s" % (person_name, posture), (0, 255, 0))
+                    color = (0, 0, 255) if is_danger else (0, 255, 0)
+                    self._draw_box(frame, bbox, "%s | %s" % (person_name, confirmed_posture), color)
 
-                for b in last_bottle_dets:
-                    self._draw_box(frame, b["bbox"], "bottle", (0, 140, 255))
+                for _, bottle_bbox in bottle_assignments:
+                    self._draw_box(frame, bottle_bbox, "bottle", (0, 140, 255))
+
+                if overload:
+                    cv2.putText(
+                        frame,
+                        "OVERLOAD",
+                        (20, 40),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        1.0,
+                        (0, 0, 255),
+                        3,
+                    )
 
                 self.status["people_count"] = people_count
                 self.status["unknown_count"] = unknown_count
@@ -226,13 +348,18 @@ class CameraService:
                         unknown_count=unknown_count,
                         lying_count=lying_count,
                         fall_count=fall_count,
-                        extra={"fps": self.status["fps"]},
+                        extra={
+                            "fps": self.status["fps"],
+                            "overload": overload,
+                            "overload_threshold": config.OVERLOAD_THRESHOLD,
+                        },
                     )
 
                 ok, jpeg = cv2.imencode(".jpg", frame)
                 if ok:
                     with self.lock:
                         self.latest_jpeg = jpeg.tobytes()
+
         except Exception as ex:
             self.status["online"] = False
             self.status["error"] = repr(ex)
@@ -260,7 +387,6 @@ class CameraService:
                 yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame + b"\r\n")
             time.sleep(0.03)
 
-
     def stop(self):
         self.running = False
         try:
@@ -277,3 +403,5 @@ class CameraService:
 
     def get_status(self):
         return self.status
+
+

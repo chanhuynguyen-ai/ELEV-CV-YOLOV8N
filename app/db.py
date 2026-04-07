@@ -1,8 +1,9 @@
-from psycopg2.extras import Json, RealDictCursor
+from typing import Optional
+
 import psycopg2
+from psycopg2.extras import Json, RealDictCursor
 
 from app import config
-
 
 
 def get_connection():
@@ -15,13 +16,11 @@ def get_connection():
     )
 
 
-
 def init_schema():
     with get_connection() as conn, conn.cursor() as cur:
         with open("schema_cv.sql", "r", encoding="utf-8") as f:
             cur.execute(f.read())
         conn.commit()
-
 
 
 def insert_event(payload: dict):
@@ -50,7 +49,6 @@ def insert_event(payload: dict):
         conn.commit()
 
 
-
 def insert_occupancy(payload: dict):
     sql = """
     INSERT INTO camera_occupancy_samples
@@ -70,7 +68,6 @@ def insert_occupancy(payload: dict):
         conn.commit()
 
 
-
 def fetch_events(limit=100, cam_id=None, event_type=None):
     q = "SELECT * FROM camera_events WHERE 1=1"
     p = []
@@ -85,7 +82,6 @@ def fetch_events(limit=100, cam_id=None, event_type=None):
     with get_connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(q, p)
         return cur.fetchall()
-
 
 
 def fetch_density(cam_id, start_ts, end_ts):
@@ -103,14 +99,44 @@ def fetch_density(cam_id, start_ts, end_ts):
         return cur.fetchall()
 
 
-
 def load_face_embeddings():
     q = """
     SELECT p.person_id, p.full_name, f.embedding
     FROM face_embeddings f
     JOIN person_registry p ON p.person_id = f.person_id
     WHERE p.is_active = TRUE
+    ORDER BY f.created_at DESC
     """
     with get_connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(q)
         return cur.fetchall()
+
+
+def upsert_person(person_code: str, full_name: str, department: Optional[str] = None):
+    sql = """
+    INSERT INTO person_registry(person_code, full_name, department, is_active)
+    VALUES (%s, %s, %s, TRUE)
+    ON CONFLICT(person_code)
+    DO UPDATE SET
+        full_name = EXCLUDED.full_name,
+        department = EXCLUDED.department,
+        is_active = TRUE
+    RETURNING person_id, person_code, full_name, department, is_active, created_at
+    """
+    with get_connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(sql, [person_code, full_name, department])
+        row = cur.fetchone()
+        conn.commit()
+        return row
+
+
+def replace_face_embedding(person_id: int, embedding):
+    delete_sql = "DELETE FROM face_embeddings WHERE person_id = %s"
+    insert_sql = "INSERT INTO face_embeddings(person_id, embedding) VALUES (%s, %s) RETURNING embedding_id, person_id, created_at"
+    emb_list = [float(x) for x in embedding]
+    with get_connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(delete_sql, [person_id])
+        cur.execute(insert_sql, [person_id, emb_list])
+        row = cur.fetchone()
+        conn.commit()
+        return row

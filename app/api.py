@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta
 from fastapi import FastAPI, Query
-from fastapi.responses import StreamingResponse, HTMLResponse
+from fastapi.responses import StreamingResponse, HTMLResponse, JSONResponse
 from app import db, config
 from app.camera_service import CameraService
 
@@ -104,37 +104,59 @@ setInterval(refreshAll, 3000);
 </html>
 """
 
+
 @app.on_event("startup")
 def startup():
     db.init_schema()
     camera_service.start()
 
+
 @app.on_event("shutdown")
 def shutdown():
     camera_service.stop()
 
-@app.get("/", response_class=HTMLResponse)
-def dashboard():
-    return DASHBOARD_HTML
+
+@app.get("/")
+def root_service_info():
+    if config.CV_DASHBOARD_ENABLED:
+        return HTMLResponse(DASHBOARD_HTML)
+    return JSONResponse(
+        {
+            "service": "elevator_cv",
+            "status": "ok",
+            "dashboard_enabled": False,
+            "message": "CV service dang chay headless. Dung /api/cv/status, /api/cv/stream, /api/cv/events, /api/cv/density.",
+            "stream_url": "/api/cv/stream",
+            "status_url": "/api/cv/status",
+            "events_url": "/api/cv/events",
+            "density_url": "/api/cv/density",
+        }
+    )
+
 
 @app.get("/api/cv/status")
 def cv_status():
     return camera_service.get_status()
+
 
 @app.get("/api/cv/stream")
 def cv_stream():
     return StreamingResponse(
         camera_service.mjpeg_generator(),
         media_type="multipart/x-mixed-replace; boundary=frame",
-        headers={"Cache-Control":"no-store, no-cache, must-revalidate, max-age=0", "Pragma":"no-cache"},
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0", "Pragma": "no-cache"},
     )
+
 
 @app.get("/api/cv/events")
 def cv_events(limit: int = 100, cam_id: str = None, event_type: str = None):
     return db.fetch_events(limit=limit, cam_id=cam_id, event_type=event_type)
+
 
 @app.get("/api/cv/density")
 def cv_density(cam_id: str = Query(default=config.CAMERA_ID), days: int = Query(default=7, ge=1, le=30)):
     end_ts = datetime.now()
     start_ts = end_ts - timedelta(days=days)
     return db.fetch_density(cam_id=cam_id, start_ts=start_ts, end_ts=end_ts)
+
+
